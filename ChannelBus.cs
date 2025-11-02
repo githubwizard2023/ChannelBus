@@ -1,90 +1,157 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 /// <summary>
-/// A high-efficiency global communication system inspired by llRegionSay.
-/// It retains the original safety feature of checking for duplicate subscriptions 
-/// while using a GC-free iteration approach in the Send method.
+/// Simple, safe, predictable ChannelBus:
+/// - Everything (Send/Register/Unregister) is enqueued first
+/// - One processing loop does operations in order
+/// - Queue limit prevents runaway spam
 /// </summary>
 public static class ChannelBus
 {
-    // The core dictionary mapping channel numbers to listener functions.
-    private static readonly Dictionary<int, List<Action<string>>> channelListeners =
+    private static readonly Dictionary<int, List<Action<string>>> channelToListeners =
         new Dictionary<int, List<Action<string>>>();
 
-    // Optimization: A pre-allocated, static list used ONLY for safe iteration in Send.
-    // This eliminates the GC pressure from creating a new array/list on every Send call.
-    private static readonly List<Action<string>> tempListeners = new List<Action<string>>(10);
+    private enum OperationType { SendMessage, AddListener, RemoveListener }
 
-    /// <summary>
-    /// Subscribes a callback function to a specific numeric channel.
-    /// The callback will be executed whenever a message is sent to that channel.
-    /// Includes the original check to prevent duplicate subscriptions.
-    /// </summary>
-    public static void Listen(int channel, Action<string> callback)
+    private struct Operation
     {
-        if (callback == null) return;
-
-        // Retrieve the listener list for the channel, or create it if it doesn't exist.
-        if (!channelListeners.TryGetValue(channel, out List<Action<string>> listeners))
-        {
-            listeners = new List<Action<string>>(1);
-            channelListeners[channel] = listeners;
-        }
-
-        // ORIGINAL SAFETY CHECK: Only add the callback if it is not already in the list.
-        // NOTE: This adds an O(n) search overhead, but prevents duplicates.
-        if (!listeners.Contains(callback))
-        {
-            listeners.Add(callback);
-        }
+        public OperationType Type;
+        public int Channel;
+        public string Message;
+        public Action<string> Listener;
     }
 
-    /// <summary>
-    /// Unsubscribes a callback function from a specific numeric channel.
-    /// If no listeners remain on that channel, the channel entry is removed.
-    /// </summary>
-    public static void ListenRemove(int channel, Action<string> callback)
+    // Safety limit to prevent memory overload / infinite loops
+    private const int MaxQueuedOperations = 1000;
+
+    private static readonly Queue<Operation> operationQueue =
+        new Queue<Operation>(16);
+
+    private static bool isProcessingOperations = false;
+
+
+    /// <summary> Register a listener to a channel </summary>
+    public static void Listen(int channel, Action<string> listener)
     {
-        if (callback == null) return;
+        if (listener == null) return;
 
-        if (channelListeners.TryGetValue(channel, out List<Action<string>> listeners))
+        EnqueueOperation(new Operation
         {
-            // List.Remove is O(n), which is standard for unsubscription.
-            listeners.Remove(callback);
-
-            if (listeners.Count == 0)
-            {
-                // Clean up the dictionary to conserve memory.
-                channelListeners.Remove(channel);
-            }
-        }
+            Type = OperationType.AddListener,
+            Channel = channel,
+            Listener = listener
+        });
     }
 
-    /// <summary>
-    /// Sends a message to all listeners registered to a specific channel.
-    /// This method is optimized to use a pre-allocated static list for iteration 
-    /// to eliminate Garbage Collection pressure.
-    /// </summary>
+    /// <summary> Remove a listener from a channel </summary>
+    public static void ListenRemove(int channel, Action<string> listener)
+    {
+        if (listener == null) return;
+
+        EnqueueOperation(new Operation
+        {
+            Type = OperationType.RemoveListener,
+            Channel = channel,
+            Listener = listener
+        });
+    }
+
+    /// <summary> Send a message on a channel </summary>
     public static void Send(int channel, string message = null)
     {
-        if (!channelListeners.TryGetValue(channel, out List<Action<string>> listeners))
+        if (string.IsNullOrEmpty(message)) return;
+
+        EnqueueOperation(new Operation
         {
+            Type = OperationType.SendMessage,
+            Channel = channel,
+            Message = message
+        });
+    }
+
+
+    /// <summary> Central enqueue handler with overflow protection </summary>
+    private static void EnqueueOperation(Operation operation)
+    {
+        if (operationQueue.Count >= MaxQueuedOperations)
+        {
+            Debug.WriteLine($"[ChannelBus] Queue FULL — operation dropped! " +
+                            $"(limit {MaxQueuedOperations})");
             return;
         }
 
-        // 1. Copy the listeners to the pre-allocated temporary list.
-        // This is the GC-free replacement for listeners.ToArray() and ensures iteration safety.
-        tempListeners.AddRange(listeners);
+        operationQueue.Enqueue(operation);
+        ProcessOperationsIfIdle();
+    }
 
-        // 2. Iterate over the temporary list.
-        for (int i = 0; i < tempListeners.Count; i++)
+
+    /// <summary> Starts processing only if not already active </summary>
+    private static void ProcessOperationsIfIdle()
+    {
+        if (isProcessingOperations) return;
+        isProcessingOperations = true;
+        ProcessOperationQueue();
+        isProcessingOperations = false;
+    }
+
+
+    /// <summary>
+    /// Processes operations in FIFO order
+    /// Any API calls inside callbacks only enqueue new operations → safe
+    /// </summary>
+    private static void ProcessOperationQueue()
+    {
+        while (operationQueue.Count > 0)
         {
-            // Invoke the action (function).
-            tempListeners[i]?.Invoke(message);
-        }
+            var currentOperation = operationQueue.Dequeue();
 
-        // 3. IMPORTANT: Clear the temporary list immediately for reuse on the next Send call.
-        tempListeners.Clear();
+            switch (currentOperation.Type)
+            {
+                case OperationType.AddListener:
+                    {
+                        if (!channelToListeners.TryGetValue(currentOperation.Channel,
+                            out var listeners))
+                        {
+                            listeners = new List<Action<string>>();
+                            channelToListeners[currentOperation.Channel] = listeners;
+                        }
+
+                        if (!listeners.Contains(currentOperation.Listener))
+                            listeners.Add(currentOperation.Listener);
+
+                        break;
+                    }
+
+                case OperationType.RemoveListener:
+                    {
+                        if (!channelToListeners.TryGetValue(currentOperation.Channel,
+                            out var listeners)) break;
+
+                        listeners.Remove(currentOperation.Listener);
+
+                        if (listeners.Count == 0)
+                            channelToListeners.Remove(currentOperation.Channel);
+
+                        break;
+                    }
+
+                case OperationType.SendMessage:
+                    {
+                        if (!channelToListeners.TryGetValue(currentOperation.Channel,
+                            out var listeners) || listeners.Count == 0)
+                            break;
+
+                        // Snapshot so iteration won't break if listeners change
+                        var listenersCopy = new List<Action<string>>(listeners);
+
+                        foreach (var listener in listenersCopy)
+                            listener?.Invoke(currentOperation.Message);
+
+                        break;
+                    }
+            }
+        }
     }
 }
