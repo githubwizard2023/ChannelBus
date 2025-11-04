@@ -10,14 +10,6 @@ using UnityEngine.UI;
 /// </summary>
 public class SwitchController : MonoBehaviour
 {
-    // Each communication type should have its own channel number.
-    // Think of channels like frequencies on a walkie-talkie — only objects
-    // tuned to the same channel will receive the message.
-    private const int SWITCH_CHANNEL = 345;
-
-    // This is the message that will be sent through the ChannelBus.
-    // The listener can interpret it however it likes (e.g., "Turn on", "Turn off", "TOGGLE").
-    private const string COMMAND = "TOGGLE";
 
     // Reference to the UI button that acts as our physical switch.
     [SerializeField] private Button switchButton;
@@ -38,6 +30,6 @@ public class SwitchController : MonoBehaviour
     /// </summary>
     private void OnSwitchButtonClicked()
     {
-        ChannelBus.Send(SWITCH_CHANNEL, COMMAND);
+        ChannelBus.Send(Channels.COMMUNICATION_CHANNEL, Commands.TOGGLE);
     }
 }

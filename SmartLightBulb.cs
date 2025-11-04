@@ -7,26 +7,17 @@ using UnityEngine;
 /// </summary>
 public class SmartLightBulb : MonoBehaviour
 {
-    // The channel number this light bulb listens to.
-    // It must match the sender’s channel (for example, the SwitchController) to receive messages.
-    private const int SWITCH_CHANNEL = 345;
-
-    // Possible commands that this light bulb can understand.
-    // You can define any number of custom string commands for your own systems.
-    private const string TURN_COMMAND = "Turn on";
-    private const string TURN_OFF_COMMAND = "Turn off";
-    private const string TOGGLE_COMMAND = "TOGGLE";
-
+ 
     private void OnEnable()
     {
         // Ensure we subscribe to the channel when the object is enabled.
-        ChannelBus.Listen(SWITCH_CHANNEL, OnCommandReceived);
+        ChannelBus.Listen(Channels.COMMUNICATION_CHANNEL, OnCommandReceived);
     }
 
     private void OnDisable()
     {
         // Clean up the subscription when the object is disabled to prevent memory leaks.
-        ChannelBus.ListenRemove(SWITCH_CHANNEL, OnCommandReceived);
+        ChannelBus.ListenRemove(Channels.COMMUNICATION_CHANNEL  , OnCommandReceived);
     }
 
     /// <summary>
@@ -37,13 +28,13 @@ public class SmartLightBulb : MonoBehaviour
     {
         switch (command)
         {
-            case TURN_COMMAND:
+            case Commands.TURN_ON:
                 TurnOn();
                 break;
-            case TURN_OFF_COMMAND:
+            case Commands.TURN_OFF:
                 TurnOff();
                 break;
-            case TOGGLE_COMMAND:
+            case Commands.TOGGLE:
                 Toggle();
                 break;
             default:
